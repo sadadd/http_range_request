@@ -1,0 +1,117 @@
+Gallery.class - Send a data file out to the browser as quickly as possible.
+
+
+  /**
+     * Send a data file out to the browser as quickly as possible.
+     *
+     * @param string $relativePath the relative path to the file from the g2data/ directory
+     * @param string $filename logical name of the file (used for the Content-Disposition header)
+     * @param string $lastModified the last modified date string (used for the Last-Modified header)
+     * @param string $mimeType the mime type (used for the Content-type header)
+     * @param int $contentLength the size of the file (used for the Content-length header)
+     * @return boolean true if we transferred the file successfully
+     */
+    function fastDownload($relativePath, $filename, $lastModified, $mimeType, $contentLength) {
+        global $gallery;
+
+        /*
+         * Note: don't use GalleryPlatform or GalleryUtilities here because this code is
+         * a shortcut that is used before we load those classes.
+         */
+        $fileNameParam = GALLERY_FORM_VARIABLE_PREFIX . 'fileName';
+        $requestFileName = isset($_GET[$fileNameParam]) ? $_GET[$fileNameParam] : null;
+        if (!empty($requestFileName) && $requestFileName != $filename) {
+            return false;
+        }
+
+        /**
+         * Try to prevent Apache's mod_deflate from gzipping this output since it's likely already
+         * a binary file and broken versions of mod_deflate sometimes get the byte count wrong.
+         */
+        if (function_exists('apache_setenv') && !@$gallery->getConfig('apacheSetenvBroken')) {
+            apache_setenv('no-gzip', '1');
+        }
+
+        $base = $this->getConfig('data.gallery.base');
+        $path = $base . $relativePath;
+
+
+        //if ($_SERVER[HTTP_REFERER]=="http://localhost/gallery2/v/20170127-dsc01364.jpg.html") return false;
+        if (file_exists($path)) {
+            $buffer = 1024 * 8;
+            if (!isset($_SERVER['HTTP_RANGE'])) { //John added if test if HTTP_RANGE is Requested
+                $fd = fopen($path, 'rb');
+                header('Content-Disposition: inline; filename="' . $filename . '"');
+                header('Last-Modified: ' . $lastModified);
+                header('Content-type: ' . $mimeType);
+                header('Content-length: ' . $contentLength);
+                header('Expires: ' . $this->getHttpDate(2147483647));
+                header('Cache-Control: public');
+                //set_magic_quotes_runtime(0);
+                set_time_limit(0);
+                while (!feof($fd)) {
+                    set_time_limit(0);
+                    print fread($fd, $buffer);
+                    flush();
+                }
+                fclose($fd);
+                return true;
+            }
+            if (isset($_SERVER['HTTP_RANGE'])) {
+                $this->range_download($path, $filename, $contentLength, $lastModified, $mimeType);
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    function range_download($path, $filename, $contentLength, $lastModified, $mimeType) {
+        $fp = @fopen($path, 'rb');
+        $size = filesize($path); // File size
+        $length = $size;                     // Content length
+        $start = 0;                             // Start byte
+        $end = $size - 1;             // End byte
+        header('Content-type: video/mp4');
+        header("Accept-Ranges: 0-$length");
+        if (isset($_SERVER['HTTP_RANGE'])) {
+            $c_start = $start;
+            $c_end = $end;
+            list(, $range) = explode('=', $_SERVER['HTTP_RANGE'], 2);
+            if (strpos($range, ',') !== false) {
+                header('HTTP/1.1 416 Requested Range Not Satisfiable');
+                header("Content-Range: bytes $start-$end/$size");
+                exit;
+            }
+            if ($range == '-') {
+                $c_start = $size - substr($range, 1);
+            } else {
+                $range = explode('-', $range);
+                $c_start = $range[0];
+                $c_end = (isset($range[1]) && is_numeric($range[1])) ? $range[1] : $size;
+            }
+            $c_end = ($c_end > $end) ? $end : $c_end;
+            if ($c_start > $c_end || $c_start > $size - 1 || $c_end >= $size) {
+                header('HTTP/1.1 416 Requested Range Not Satisfiable');
+                header("Content-Range: bytes $start-$end/$size");
+                exit;
+            }
+            $start = $c_start;
+            $end = $c_end;
+            $length = $end - $start + 1;
+            fseek($fp, $start);
+            header('HTTP/1.1 206 Partial Content');
+        }
+        header("Content-Range: bytes $start-$end/$size");
+        header("Content-Length: " . $length);
+        $buffer = 1024 * 8;
+        while (!feof($fp) && ($p = ftell($fp)) <= $end) {
+            if ($p + $buffer > $end) {
+                $buffer = $end - $p + 1;
+            }
+            set_time_limit(0);
+            echo fread($fp, $buffer);
+            flush();
+        }
+        fclose($fp);
+    }
